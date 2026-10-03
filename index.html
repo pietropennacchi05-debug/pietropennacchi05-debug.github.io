@@ -204,9 +204,9 @@
       logToConsole("Avvio scansione BLE per 'ESP32_Wind_Sensor'...");
 
       const device = await navigator.bluetooth.requestDevice({
-        filters: [{ name: 'ESP32_Wind_Sensor' }],
-        optionalServices: [SERVICE_UUID]
-      });
+  acceptAllDevices: true,
+  optionalServices: [SERVICE_UUID]
+});
 
       logToConsole(`Dispositivo trovato: ${device.name}. Connessione GATT...`);
       const server = await device.gatt.connect();
