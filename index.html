@@ -60,7 +60,6 @@
       border-radius: 6px;
       margin-bottom: 15px;
     }
-    /* Stile Console / Monitor Dati */
     .console-box {
       background-color: #1e1e1e;
       color: #00ff66;
@@ -97,7 +96,7 @@
 
   <div class="status-grid">
     <div>Direzione: <span id="valDir" class="val-display">--</span> °</div>
-    <div>Velocità: <span id="valSpeed" class="val-display">--</span> m/s</div>
+    <div>Velocità: <span id="valSpeed" class="val-display">--</span> kn (<span id="valSpeedMs">--</span> m/s)</div>
     <div>Asse X: <span id="valX" class="val-display">0</span> m</div>
     <div>Asse Z: <span id="valZ" class="val-display">-2</span> m</div>
   </div>
@@ -118,7 +117,7 @@
 
   <div class="control-group">
     <label for="audioFile">Carica un file audio:</label>
-    <input type="file" id="audioFile" accept="audio/*, .mp3, .m4a, .wav, .mp4, audio/mpeg, audio/mp3">
+    <input type="file" id="audioFile" accept="audio/*">
   </div>
 
   <div class="control-group">
@@ -131,7 +130,10 @@
   let audioCtx;
   let audioElement;
   let sourceNode;
+  let gainNode;
   let pannerNode;
+
+  let lastDegrees = null;
 
   const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
   const CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
@@ -140,6 +142,7 @@
   const bleStatus = document.getElementById('bleStatus');
   const valDir = document.getElementById('valDir');
   const valSpeed = document.getElementById('valSpeed');
+  const valSpeedMs = document.getElementById('valSpeedMs');
   const valX = document.getElementById('valX');
   const valZ = document.getElementById('valZ');
   const rawPayload = document.getElementById('rawPayload');
@@ -150,7 +153,6 @@
   const btnPlay = document.getElementById('btnPlay');
   const btnPause = document.getElementById('btnPause');
 
-  // Funzione Utility per la Console di Log
   function logToConsole(message) {
     const now = new Date().toLocaleTimeString();
     consoleLog.innerHTML += `\n[${now}] ${message}`;
@@ -161,7 +163,7 @@
     consoleLog.innerHTML = "--- Monitor Pulito ---";
   });
 
-  // 1. Configurazione Web Audio API (HRTF 3D Panner con Latenza Minima)
+  // Caricamento del file audio e attivazione del Loop
   fileInput.addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -169,22 +171,35 @@
     const fileURL = URL.createObjectURL(file);
     if (!audioElement) audioElement = new Audio();
     audioElement.src = fileURL;
+    
+    // Attiva la riproduzione in loop infinito
     audioElement.loop = true;
     
+    // Fallback di sicurezza: forza il riavvio se la traccia termina
+    audioElement.onended = () => {
+      audioElement.currentTime = 0;
+      audioElement.play();
+    };
+
     if (!audioCtx) initWebAudio();
 
     btnPlay.disabled = false;
     btnPause.disabled = false;
-    logToConsole("File audio caricato con successo.");
+    logToConsole("File audio caricato con successo (Loop infinito attivo).");
   });
 
   function initWebAudio() {
-    // Configurazione per minima latenza interattiva
     audioCtx = new (window.AudioContext || window.webkitAudioContext)({
       latencyHint: 'interactive'
     });
+    
     sourceNode = audioCtx.createMediaElementSource(audioElement);
 
+    // Controllo Guadagno/Volume dinamico
+    gainNode = audioCtx.createGain();
+    gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+
+    // Panning 3D Spaziale (HRTF)
     pannerNode = audioCtx.createPanner();
     pannerNode.panningModel = 'HRTF';
     pannerNode.distanceModel = 'inverse';
@@ -192,11 +207,11 @@
     pannerNode.maxDistance = 10000;
     pannerNode.rolloffFactor = 1;
 
-    sourceNode.connect(pannerNode);
+    sourceNode.connect(gainNode);
+    gainNode.connect(pannerNode);
     pannerNode.connect(audioCtx.destination);
   }
 
-  // 2. Connessione Web Bluetooth
   btnConnect.addEventListener('click', async () => {
     try {
       bleStatus.textContent = "Ricerca ESP32...";
@@ -204,9 +219,9 @@
       logToConsole("Avvio scansione BLE per 'ESP32_Wind_Sensor'...");
 
       const device = await navigator.bluetooth.requestDevice({
-  acceptAllDevices: true,
-  optionalServices: [SERVICE_UUID]
-});
+        filters: [{ name: 'ESP32_Wind_Sensor' }],
+        optionalServices: [SERVICE_UUID]
+      });
 
       logToConsole(`Dispositivo trovato: ${device.name}. Connessione GATT...`);
       const server = await device.gatt.connect();
@@ -235,37 +250,57 @@
     }
   });
 
-  // 3. Ricezione Dati Binari (DataView 6 Byte), Aggiornamento UI e Sonificazione
   function handleBLEData(event) {
-    const dataView = event.target.value; // DataView con il buffer binario da 6 byte
+    const dataView = event.target.value;
 
-    // Controllo di sicurezza sulla dimensione del buffer
     if (dataView.byteLength < 6) {
       logToConsole(`Errore: Ricevuti ${dataView.byteLength} byte invece dei 6 attesi.`);
       return;
     }
 
     try {
-      // Decodifica Binaria (Little-Endian = true)
-      // Byte 0-1: uint16 (Direzione 0-360°)
       const degrees = dataView.getUint16(0, true);
-      // Byte 2-5: float32 (Velocità m/s)
-      const speed = dataView.getFloat32(2, true);
+      const speedMs = dataView.getFloat32(2, true);
 
-      // Conversione HEX per debug visivo nel monitor
+      const speedKnots = speedMs * 1.94384;
+
       const hexBytes = Array.from(new Uint8Array(dataView.buffer))
         .map(b => b.toString(16).padStart(2, '0').toUpperCase())
         .join(' ');
 
-      rawPayload.textContent = `[HEX: ${hexBytes}] → Dir: ${degrees}°, Speed: ${speed.toFixed(2)} m/s`;
-      logToConsole(`RX Binario -> Dir: ${degrees}°, Speed: ${speed.toFixed(2)} m/s`);
+      rawPayload.textContent = `[HEX: ${hexBytes}] → Dir: ${degrees}°, Speed: ${speedKnots.toFixed(1)} kn (${speedMs.toFixed(2)} m/s)`;
+      logToConsole(`RX -> Dir: ${degrees}°, Speed: ${speedKnots.toFixed(1)} kn`);
 
       valDir.textContent = degrees;
-      valSpeed.textContent = speed.toFixed(2);
+      if (valSpeed) valSpeed.textContent = speedKnots.toFixed(1);
+      if (valSpeedMs) valSpeedMs.textContent = speedMs.toFixed(2);
 
-      // Conversione Gradi in Radianti per Panning 3D
+      // Volume proporzionale al vento (0 kn = 0.0, 40 kn = 1.0)
+      const baseGain = Math.min(1.0, Math.max(0.0, speedKnots / 40.0));
+
+      // Boost temporaneo su cambio direzione
+      let deltaAngle = 0;
+      if (lastDegrees !== null) {
+        let diff = Math.abs(degrees - lastDegrees);
+        if (diff > 180) diff = 360 - diff;
+        deltaAngle = diff;
+      }
+      lastDegrees = degrees;
+
+      const rotationBoost = Math.min(0.35, (deltaAngle / 45.0) * 0.25);
+      const boostedGain = Math.min(1.0, baseGain + rotationBoost);
+
+      if (gainNode && audioCtx) {
+        const now = audioCtx.currentTime;
+        gainNode.gain.cancelScheduledValues(now);
+
+        gainNode.gain.setTargetAtTime(boostedGain, now, 0.03);
+        gainNode.gain.setTargetAtTime(baseGain, now + 0.08, 0.35);
+      }
+
+      // Posizionamento spaziale 3D
       const rad = degrees * (Math.PI / 180);
-      const radius = 2; // Distanza fissa della sorgente sonora (metri)
+      const radius = 2;
 
       const x = parseFloat((radius * Math.sin(rad)).toFixed(2));
       const y = 0;
@@ -274,13 +309,12 @@
       valX.textContent = x;
       valZ.textContent = z;
 
-      // Posizionamento istantaneo/morbido nello spazio Web Audio API
       if (pannerNode && audioCtx) {
         const now = audioCtx.currentTime;
         if (pannerNode.positionX.setTargetAtTime) {
-          pannerNode.positionX.setTargetAtTime(x, now, 0.02);
-          pannerNode.positionY.setTargetAtTime(y, now, 0.02);
-          pannerNode.positionZ.setTargetAtTime(z, now, 0.02);
+          pannerNode.positionX.setTargetAtTime(x, now, 0.05);
+          pannerNode.positionY.setTargetAtTime(y, now, 0.05);
+          pannerNode.positionZ.setTargetAtTime(z, now, 0.05);
         } else {
           pannerNode.positionX.setValueAtTime(x, now);
           pannerNode.positionY.setValueAtTime(y, now);
@@ -292,7 +326,6 @@
     }
   }
 
-  // Controlli Audio
   btnPlay.addEventListener('click', () => {
     if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
     audioElement.play();
@@ -304,6 +337,9 @@
     logToConsole("Riproduzione audio in pausa.");
   });
 </script>
+
+</body>
+</html>
 
 </body>
 </html>
