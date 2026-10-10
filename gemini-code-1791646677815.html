@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sonificazione Vento 360° + Monitor BLE</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 600px;
+      margin: 20px auto;
+      padding: 16px;
+      background-color: #f4f4f9;
+      color: #333;
+    }
+    .card {
+      background: white;
+      padding: 20px;
+      border-radius: 12px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+      margin-bottom: 20px;
+    }
+    .control-group {
+      margin-bottom: 16px;
+    }
+    label {
+      display: block;
+      font-weight: bold;
+      margin-bottom: 6px;
+    }
+    .val-display {
+      font-weight: bold;
+      color: #0066cc;
+    }
+    button {
+      background-color: #0066cc;
+      color: white;
+      border: none;
+      padding: 10px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 15px;
+      margin-right: 8px;
+      margin-bottom: 8px;
+    }
+    button:disabled {
+      background-color: #ccc;
+    }
+    button.clear-btn {
+      background-color: #666;
+      font-size: 12px;
+      padding: 6px 10px;
+    }
+    .status-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      background: #eef6ff;
+      padding: 12px;
+      border-radius: 6px;
+      margin-bottom: 15px;
+    }
+    .console-box {
+      background-color: #1e1e1e;
+      color: #00ff66;
+      font-family: 'Courier New', Courier, monospace;
+      padding: 12px;
+      border-radius: 6px;
+      height: 160px;
+      overflow-y: auto;
+      font-size: 13px;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .raw-payload {
+      background: #fff3cd;
+      border: 1px solid #ffeeba;
+      color: #856404;
+      padding: 8px;
+      border-radius: 6px;
+      font-family: monospace;
+      font-size: 13px;
+      margin-bottom: 12px;
+    }
+  </style>
+</head>
+<body>
+
+<div class="card">
+  <h2>1. Connessione & Dati Sensore</h2>
+
+  <div class="control-group">
+    <button id="btnConnect">Connetti ESP32 (BLE)</button>
+    <span id="bleStatus" style="font-weight: bold; color: #777;">Disconnesso</span>
+  </div>
+
+  <div class="status-grid">
+    <div>Direzione: <span id="valDir" class="val-display">--</span> °</div>
+    <div>Velocità: <span id="valSpeed" class="val-display">--</span> kn (<span id="valSpeedMs">--</span> m/s)</div>
+    <div>Asse X: <span id="valX" class="val-display">0</span> m</div>
+    <div>Asse Z: <span id="valZ" class="val-display">-2</span> m</div>
+  </div>
+
+  <label>Ultimo Pacchetto Ricevuto (Binario 6 Byte):</label>
+  <div id="rawPayload" class="raw-payload">In attesa di dati...</div>
+
+  <div style="display: flex; justify-content: space-between; align-items: center;">
+    <label>Log di Comunicazione BLE:</label>
+    <button class="clear-btn" id="btnClearLog">Pulisci Log</button>
+  </div>
+  <div id="consoleLog" class="console-box">--- Monitor Avviato ---</div>
+</div>
+
+<div class="card">
+  <h2>2. Sonificazione Audio 360°</h2>
+  <p style="font-size: 14px; color: #666;"><i>Indossa le cuffie. Il suono ruoterà attorno a te a seconda della direzione del vento.</i></p>
+
+  <div class="control-group">
+    <label for="audioFile">Carica un file audio:</label>
+    <input type="file" id="audioFile" accept="audio/*">
+  </div>
+
+  <div class="control-group">
+    <button id="btnPlay" disabled>Play Audio</button>
+    <button id="btnPause" disabled>Pausa</button>
+  </div>
+</div>
+
+<script>
+  let audioCtx;
+  let audioElement;
+  let sourceNode;
+  let gainNode;
+  let pannerNode;
+
+  let lastDegrees = null;
+
+  const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+  const CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+
+  const btnConnect = document.getElementById('btnConnect');
+  const bleStatus = document.getElementById('bleStatus');
+  const valDir = document.getElementById('valDir');
+  const valSpeed = document.getElementById('valSpeed');
+  const valSpeedMs = document.getElementById('valSpeedMs');
+  const valX = document.getElementById('valX');
+  const valZ = document.getElementById('valZ');
+  const rawPayload = document.getElementById('rawPayload');
+  const consoleLog = document.getElementById('consoleLog');
+  const btnClearLog = document.getElementById('btnClearLog');
+
+  const fileInput = document.getElementById('audioFile');
+  const btnPlay = document.getElementById('btnPlay');
+  const btnPause = document.getElementById('btnPause');
+
+  function logToConsole(message) {
+    const now = new Date().toLocaleTimeString();
+    consoleLog.innerHTML += `\n[${now}] ${message}`;
+    consoleLog.scrollTop = consoleLog.scrollHeight;
+  }
+
+  btnClearLog.addEventListener('click', () => {
+    consoleLog.innerHTML = "--- Monitor Pulito ---";
+  });
+
+  // Caricamento del file audio e attivazione del Loop
+  fileInput.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const fileURL = URL.createObjectURL(file);
+    if (!audioElement) audioElement = new Audio();
+    audioElement.src = fileURL;
+    
+    // Attiva la riproduzione in loop infinito
+    audioElement.loop = true;
+    
+    // Fallback di sicurezza: forza il riavvio se la traccia termina
+    audioElement.onended = () => {
+      audioElement.currentTime = 0;
+      audioElement.play();
+    };
+
+    if (!audioCtx) initWebAudio();
+
+    btnPlay.disabled = false;
+    btnPause.disabled = false;
+    logToConsole("File audio caricato con successo (Loop infinito attivo).");
+  });
+
+  function initWebAudio() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+      latencyHint: 'interactive'
+    });
+    
+    sourceNode = audioCtx.createMediaElementSource(audioElement);
+
+    // Controllo Guadagno/Volume dinamico
+    gainNode = audioCtx.createGain();
+    gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+
+    // Panning 3D Spaziale (HRTF)
+    pannerNode = audioCtx.createPanner();
+    pannerNode.panningModel = 'HRTF';
+    pannerNode.distanceModel = 'inverse';
+    pannerNode.refDistance = 1;
+    pannerNode.maxDistance = 10000;
+    pannerNode.rolloffFactor = 1;
+
+    sourceNode.connect(gainNode);
+    gainNode.connect(pannerNode);
+    pannerNode.connect(audioCtx.destination);
+  }
+
+  btnConnect.addEventListener('click', async () => {
+    try {
+      bleStatus.textContent = "Ricerca ESP32...";
+      bleStatus.style.color = "#d97706";
+      logToConsole("Avvio scansione BLE per 'ESP32_Wind_Sensor'...");
+
+      const device = await navigator.bluetooth.requestDevice({
+        filters: [{ name: 'ESP32_Wind_Sensor' }],
+        optionalServices: [SERVICE_UUID]
+      });
+
+      logToConsole(`Dispositivo trovato: ${device.name}. Connessione GATT...`);
+      const server = await device.gatt.connect();
+      
+      logToConsole("Recupero Servizio e Caratteristica...");
+      const service = await server.getPrimaryService(SERVICE_UUID);
+      const characteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+
+      await characteristic.startNotifications();
+      characteristic.addEventListener('characteristicvaluechanged', handleBLEData);
+
+      bleStatus.textContent = "Connesso";
+      bleStatus.style.color = "green";
+      logToConsole("Notifiche BLE attivate. Ricezione dati in corso...");
+
+      device.addEventListener('gattserverdisconnected', () => {
+        bleStatus.textContent = "Disconnesso";
+        bleStatus.style.color = "red";
+        logToConsole("ATTENZIONE: L'ESP32 si è disconnesso.");
+      });
+
+    } catch (error) {
+      logToConsole(`ERRORE BLE: ${error.message}`);
+      bleStatus.textContent = "Errore";
+      bleStatus.style.color = "red";
+    }
+  });
+
+  function handleBLEData(event) {
+    const dataView = event.target.value;
+
+    if (dataView.byteLength < 6) {
+      logToConsole(`Errore: Ricevuti ${dataView.byteLength} byte invece dei 6 attesi.`);
+      return;
+    }
+
+    try {
+      const degrees = dataView.getUint16(0, true);
+      const speedMs = dataView.getFloat32(2, true);
+
+      const speedKnots = speedMs * 1.94384;
+
+      const hexBytes = Array.from(new Uint8Array(dataView.buffer))
+        .map(b => b.toString(16).padStart(2, '0').toUpperCase())
+        .join(' ');
+
+      rawPayload.textContent = `[HEX: ${hexBytes}] → Dir: ${degrees}°, Speed: ${speedKnots.toFixed(1)} kn (${speedMs.toFixed(2)} m/s)`;
+      logToConsole(`RX -> Dir: ${degrees}°, Speed: ${speedKnots.toFixed(1)} kn`);
+
+      valDir.textContent = degrees;
+      if (valSpeed) valSpeed.textContent = speedKnots.toFixed(1);
+      if (valSpeedMs) valSpeedMs.textContent = speedMs.toFixed(2);
+
+      // Volume proporzionale al vento (0 kn = 0.0, 40 kn = 1.0)
+      const baseGain = Math.min(1.0, Math.max(0.0, speedKnots / 40.0));
+
+      // Boost temporaneo su cambio direzione
+      let deltaAngle = 0;
+      if (lastDegrees !== null) {
+        let diff = Math.abs(degrees - lastDegrees);
+        if (diff > 180) diff = 360 - diff;
+        deltaAngle = diff;
+      }
+      lastDegrees = degrees;
+
+      const rotationBoost = Math.min(0.35, (deltaAngle / 45.0) * 0.25);
+      const boostedGain = Math.min(1.0, baseGain + rotationBoost);
+
+      if (gainNode && audioCtx) {
+        const now = audioCtx.currentTime;
+        gainNode.gain.cancelScheduledValues(now);
+
+        gainNode.gain.setTargetAtTime(boostedGain, now, 0.03);
+        gainNode.gain.setTargetAtTime(baseGain, now + 0.08, 0.35);
+      }
+
+      // Posizionamento spaziale 3D
+      const rad = degrees * (Math.PI / 180);
+      const radius = 2;
+
+      const x = parseFloat((radius * Math.sin(rad)).toFixed(2));
+      const y = 0;
+      const z = parseFloat((-radius * Math.cos(rad)).toFixed(2));
+
+      valX.textContent = x;
+      valZ.textContent = z;
+
+      if (pannerNode && audioCtx) {
+        const now = audioCtx.currentTime;
+        if (pannerNode.positionX.setTargetAtTime) {
+          pannerNode.positionX.setTargetAtTime(x, now, 0.05);
+          pannerNode.positionY.setTargetAtTime(y, now, 0.05);
+          pannerNode.positionZ.setTargetAtTime(z, now, 0.05);
+        } else {
+          pannerNode.positionX.setValueAtTime(x, now);
+          pannerNode.positionY.setValueAtTime(y, now);
+          pannerNode.positionZ.setValueAtTime(z, now);
+        }
+      }
+    } catch (e) {
+      logToConsole(`Errore Decodifica Binaria: ${e.message}`);
+    }
+  }
+
+  btnPlay.addEventListener('click', () => {
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    audioElement.play();
+    logToConsole("Riproduzione audio avviata.");
+  });
+
+  btnPause.addEventListener('click', () => {
+    audioElement.pause();
+    logToConsole("Riproduzione audio in pausa.");
+  });
+</script>
+
+</body>
+</html>
