@@ -116,11 +116,12 @@
 
 <div class="card">
   <h2>2. Sonificazione Audio 360°</h2>
-  <p style="font-size: 13px; color: #666;">Indossa le cuffie e premi Play prima di connettere il sensore.</p>
+  <p style="font-size: 13px; color: #666;">Carica un file MP3 o WAV, premi Play e poi connetti l'ESP32.</p>
 
   <div class="control-group">
-    <label for="audioFile">Carica File Audio (MP3 / WAV / M4A):</label>
-    <input type="file" id="audioFile" accept="audio/*, .mp3, audio/mpeg, .m4a, .wav">
+    <label for="audioFile">Seleziona File MP3, WAV o M4A:</label>
+    <!-- MODIFICA FONDAMENTALE PER IOS: Dichiarazione esplicita di tutte le varianti MP3 per l'app Archivi di iOS -->
+    <input type="file" id="audioFile" accept=".mp3, audio/mpeg, audio/mp3, audio/x-mp3, .m4a, .wav, .mp4, audio/*">
   </div>
 
   <div class="control-group">
@@ -132,12 +133,8 @@
 <script type="module">
   import { WindSonifierEngine } from './WindSonifierEngine.js';
 
-  // Istanza globale del motore per prevenire il Garbage Collection su iOS
   const sonifier = new WindSonifierEngine();
   window._sonifierInstance = sonifier;
-
-  let audioElement = null;
-  let currentObjectURL = null;
 
   const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
   const CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
@@ -167,38 +164,28 @@
     consoleLog.innerHTML = "--- Monitor Pulito ---";
   });
 
-  // Gestione caricamento file ed eliminazione di leak di memoria su iOS
-  fileInput.addEventListener('change', (e) => {
+  // Gestione caricamento e decodifica file MP3 per iOS
+  fileInput.addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
 
-    if (currentObjectURL) {
-      URL.revokeObjectURL(currentObjectURL);
+    btnPlay.disabled = true;
+    logToConsole(`Caricamento e decodifica in corso: ${file.name}...`);
+
+    try {
+      await sonifier.loadAudioFile(file);
+      btnPlay.disabled = false;
+      btnPause.disabled = false;
+      logToConsole(`File MP3 decodificato con successo! Pronto per il Play.`);
+    } catch (err) {
+      logToConsole(`ERRORE caricamento MP3: ${err.message}`);
     }
-    currentObjectURL = URL.createObjectURL(file);
-
-    if (!audioElement) {
-      audioElement = new Audio();
-      audioElement.setAttribute('playsinline', 'true');
-      audioElement.setAttribute('webkit-playsinline', 'true');
-      audioElement.preload = 'auto';
-    }
-
-    audioElement.src = currentObjectURL;
-    audioElement.loop = true;
-
-    btnPlay.disabled = false;
-    btnPause.disabled = false;
-    logToConsole(`Caricato file: ${file.name}`);
   });
 
   btnPlay.addEventListener('click', async () => {
     try {
-      if (!sonifier.isInitialized) {
-        await sonifier.init(audioElement);
-      }
       await sonifier.play();
-      logToConsole("Riproduzione audio avviata.");
+      logToConsole("Riproduzione audio MP3 avviata.");
     } catch (err) {
       logToConsole(`Errore avvio audio: ${err.message}`);
     }
@@ -236,7 +223,7 @@
       device.addEventListener('gattserverdisconnected', () => {
         bleStatus.textContent = "Disconnesso";
         bleStatus.style.color = "red";
-        logToConsole("ATTENZIONE: Disconnessione BLE rilvata.");
+        logToConsole("ATTENZIONE: Disconnessione BLE rilevata.");
       });
 
     } catch (error) {
@@ -254,10 +241,8 @@
       const degrees = dataView.getUint16(0, true);
       const speedMs = dataView.getFloat32(2, true);
 
-      // Passaggio dati all'algoritmo disaccoppiato
       const calc = sonifier.processWindData(degrees, speedMs);
 
-      // Aggiornamento DOM (solo se c'è un pacchetto valido processato)
       valDir.textContent = degrees;
       valSpeedMs.textContent = speedMs.toFixed(2);
 
